@@ -16,15 +16,26 @@ def _as_points(track):
 
 
 def load_npy_trajectories(path):
-    data = np.load(path, allow_pickle=False)
-    if data.ndim != 3 or data.shape[2] != 2:
-        raise ValueError(f"Expected [num_tracks, num_points, 2], got {data.shape}.")
+    data = np.load(path, allow_pickle=True)
+    if data.ndim == 3 and data.shape[2] == 2:
+        raw_tracks = data
+    elif data.ndim == 1:
+        raw_tracks = data
+    else:
+        raise ValueError(
+            "Expected a fixed array [N, T, 2] or a ragged object array [N], "
+            f"got shape={data.shape}, dtype={data.dtype}."
+        )
 
     tracks = []
     source_indices = []
     dropped_stationary_count = 0
-    for source_index, track in enumerate(data):
+    for source_index, track in enumerate(raw_tracks):
         points = np.asarray(track, dtype=np.float32)
+        if points.ndim != 2 or points.shape[1] != 2:
+            raise ValueError(
+                f"Trajectory {source_index} must have shape [Li, 2], got {points.shape}."
+            )
         points = points[np.isfinite(points).all(axis=1)]
         if len(points) < 2:
             dropped_stationary_count += 1
