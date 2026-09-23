@@ -188,23 +188,75 @@ def thin_similar_trajectories(
     direction_threshold_deg=30.0,
     resample_points=40,
 ):
+    """
+    Vectorized equivalent of the original greedy grouping algorithm.
+
+    The representative order and first-match rule are unchanged. Only the
+    comparisons against the current representatives are evaluated as a batch.
+    """
     sampled = [_resample_by_arclength(track, resample_points) for track in trajs]
+    points = np.stack(sampled, axis=0)
+
+    tangents = np.diff(points, axis=1)
+    tangent_norms = np.linalg.norm(tangents, axis=2)
+    valid_tangents = tangent_norms > 1e-6
+    unit_tangents = np.divide(
+        tangents,
+        tangent_norms[:, :, None],
+        out=np.zeros_like(tangents),
+        where=valid_tangents[:, :, None],
+    )
+    minimum_cosine = np.cos(np.deg2rad(direction_threshold_deg))
+    maximum_p90_distance = distance_threshold_px * 1.8
+
     groups = []
     representatives = []
 
-    for index, candidate in enumerate(sampled):
-        matched = False
-        for group_index, representative_index in enumerate(representatives):
-            if _same_directed_path(
-                candidate,
-                sampled[representative_index],
-                distance_threshold_px,
-                direction_threshold_deg,
-            ):
-                groups[group_index].append(index)
-                matched = True
-                break
-        if not matched:
+    for index in range(len(points)):
+        if not representatives:
+            representatives.append(index)
+            groups.append([index])
+            continue
+
+        representative_array = np.asarray(representatives, dtype=np.intp)
+
+        # Spatial metrics for this candidate against every current representative.
+        distances = np.linalg.norm(
+            points[representative_array] - points[index],
+            axis=2,
+        )
+        mean_distances = np.mean(distances, axis=1)
+        p90_distances = np.percentile(distances, 90, axis=1)
+        spatial_match = (
+            (mean_distances <= distance_threshold_px)
+            & (p90_distances <= maximum_p90_distance)
+        )
+
+        # Direction metrics reuse precomputed normalized local tangents.
+        pair_valid = (
+            valid_tangents[representative_array]
+            & valid_tangents[index][None, :]
+        )
+        cosine = np.einsum(
+            "rkd,kd->rk",
+            unit_tangents[representative_array],
+            unit_tangents[index],
+        )
+        valid_counts = np.sum(pair_valid, axis=1)
+        direction_agreements = np.divide(
+            np.sum((cosine >= minimum_cosine) & pair_valid, axis=1),
+            valid_counts,
+            out=np.zeros(len(representatives), dtype=np.float64),
+            where=valid_counts > 0,
+        )
+
+        matching_groups = np.flatnonzero(
+            spatial_match & (direction_agreements >= 0.85)
+        )
+        if len(matching_groups):
+            # Preserve the original greedy rule: use the first matching group.
+            groups[int(matching_groups[0])].append(index)
+        else:
             representatives.append(index)
             groups.append([index])
 
@@ -321,7 +373,7 @@ def demo(
     )
 
     os.makedirs(output_dir, exist_ok=True)
-    output_path = os.path.join(output_dir, "directionl_trajectory_arrow.png")
+    output_path = os.path.join(output_dir, "directionl_trajectory_arrow_speed.png")
     cv2.imwrite(output_path, rendered)
 
     manifest = {
@@ -355,6 +407,9 @@ def demo(
 
 
 if __name__ == "__main__":
+    from time import time
+    start_time = time()
     traj_path = r"D:\wsl\traj\merged_trajectories.npy"
-    output_dir = r"D:\wsl"
+    output_dir = r"D:\wsl\pose"
     demo(traj_path, output_dir)
+    print(f"consume time: {time() - start_time}")
